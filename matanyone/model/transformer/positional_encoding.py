@@ -98,8 +98,16 @@ class PositionalEncoding(nn.Module):
 
 
 if __name__ == '__main__':
-    pe = PositionalEncoding(8).cuda()
-    input = torch.ones((1, 8, 8, 8)).cuda()
+    # Set up device detection for testing
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+    
+    pe = PositionalEncoding(8).to(device)
+    input = torch.ones((1, 8, 8, 8)).to(device)
     output = pe(input)
     # print(output)
     print(output[0, :, 0, 0])

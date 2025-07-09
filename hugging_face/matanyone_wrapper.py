@@ -5,6 +5,27 @@ import numpy as np
 import random
 import cv2
 
+# Set up device detection for Mac MPS support
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+    print("Using MPS (Apple Metal) for PyTorch")
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+    print("Using CUDA")
+else:
+    device = torch.device("cpu")
+    print("Using CPU")
+
+# Helper function to get the appropriate autocast context
+def get_autocast_context(device):
+    if device.type == "cuda":
+        return torch.amp.autocast("cuda")
+    elif device.type == "mps":
+        # MPS doesn't support autocast yet, so we use a no-op context
+        return torch.inference_mode()
+    else:
+        return torch.inference_mode()
+
 def gen_dilate(alpha, min_kernel_size, max_kernel_size): 
     kernel_size = random.randint(min_kernel_size, max_kernel_size)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size,kernel_size))
@@ -20,7 +41,6 @@ def gen_erosion(alpha, min_kernel_size, max_kernel_size):
     return erode.astype(np.float32)
 
 @torch.inference_mode()
-@torch.amp.autocast("cuda")
 def matanyone(processor, frames_np, mask, r_erode=0, r_dilate=0, n_warmup=10):
     """
     Args:
@@ -41,33 +61,36 @@ def matanyone(processor, frames_np, mask, r_erode=0, r_dilate=0, n_warmup=10):
     if r_erode > 0:
         mask = gen_erosion(mask, r_erode, r_erode)
 
-    mask = torch.from_numpy(mask).cuda()
+    mask = torch.from_numpy(mask).to(device)
 
     frames_np = [frames_np[0]]* n_warmup + frames_np
 
     frames = []
     phas = []
-    for ti, frame_single in tqdm.tqdm(enumerate(frames_np)):
-        image = to_tensor(frame_single).cuda().float()
+    
+    # Use appropriate autocast context based on device
+    with get_autocast_context(device):
+        for ti, frame_single in tqdm.tqdm(enumerate(frames_np)):
+            image = to_tensor(frame_single).to(device).float()
 
-        if ti == 0:
-            output_prob = processor.step(image, mask, objects=objects)      # encode given mask
-            output_prob = processor.step(image, first_frame_pred=True)      # clear past memory for warmup frames
-        else:
-            if ti <= n_warmup:
-                output_prob = processor.step(image, first_frame_pred=True)  # clear past memory for warmup frames
+            if ti == 0:
+                output_prob = processor.step(image, mask, objects=objects)      # encode given mask
+                output_prob = processor.step(image, first_frame_pred=True)      # clear past memory for warmup frames
             else:
-                output_prob = processor.step(image)
+                if ti <= n_warmup:
+                    output_prob = processor.step(image, first_frame_pred=True)  # clear past memory for warmup frames
+                else:
+                    output_prob = processor.step(image)
 
-        # convert output probabilities to an object mask
-        mask = processor.output_prob_to_mask(output_prob)
+            # convert output probabilities to an object mask
+            mask = processor.output_prob_to_mask(output_prob)
 
-        pha = mask.unsqueeze(2).cpu().numpy()
-        com_np = frame_single / 255. * pha + bgr * (1 - pha)
-        
-        # DONOT save the warmup frames
-        if ti > (n_warmup-1):
-            frames.append((com_np*255).astype(np.uint8))
-            phas.append((pha*255).astype(np.uint8))
+            pha = mask.unsqueeze(2).cpu().numpy()
+            com_np = frame_single / 255. * pha + bgr * (1 - pha)
+            
+            # DONOT save the warmup frames
+            if ti > (n_warmup-1):
+                frames.append((com_np*255).astype(np.uint8))
+                phas.append((pha*255).astype(np.uint8))
     
     return frames, phas

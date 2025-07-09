@@ -17,18 +17,38 @@ from matanyone.utils.get_default_model import get_matanyone_model
 import warnings
 warnings.filterwarnings("ignore")
 
+# Set up device detection for Mac MPS support
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+    print("Using MPS (Apple Metal) for PyTorch")
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+    print("Using CUDA")
+else:
+    device = torch.device("cpu")
+    print("Using CPU")
+
+# Helper function to get the appropriate autocast context
+def get_autocast_context(device):
+    if device.type == "cuda":
+        return torch.amp.autocast("cuda")
+    elif device.type == "mps":
+        # MPS doesn't support autocast yet, so we use a no-op context
+        return torch.inference_mode()
+    else:
+        return torch.inference_mode()
+
 @torch.inference_mode()
-@torch.amp.autocast("cuda")
 def main(input_path, mask_path, output_path, ckpt_path, n_warmup=10, r_erode=10, r_dilate=10, suffix="", save_image=False, max_size=-1):
     # download ckpt for the first inference
     pretrain_model_url = "https://github.com/pq-yang/MatAnyone/releases/download/v1.0.0/matanyone.pth"
     ckpt_path = load_file_from_url(pretrain_model_url, 'pretrained_models')
     
     # load MatAnyone model
-    matanyone = get_matanyone_model(ckpt_path)
+    matanyone = get_matanyone_model(ckpt_path, device=device)
 
-    # init inference processor
-    processor = InferenceCore(matanyone, cfg=matanyone.cfg)
+    # init inference processor with device
+    processor = InferenceCore(matanyone, cfg=matanyone.cfg, device=device)
 
     # inference parameters
     r_erode = int(r_erode)
@@ -65,7 +85,7 @@ def main(input_path, mask_path, output_path, ckpt_path, n_warmup=10, r_erode=10,
     mask = Image.open(mask_path).convert('L')
     mask = np.array(mask)
 
-    bgr = (np.array([120, 255, 155], dtype=np.float32)/255).reshape((1, 1, 3)) # green screen to paste fgr
+    bgr = (np.array([0, 0, 0], dtype=np.float32)/255).reshape((1, 1, 3)) # green screen to paste fgr
     objects = [1]
 
     # [optional] erode & dilate
@@ -74,7 +94,7 @@ def main(input_path, mask_path, output_path, ckpt_path, n_warmup=10, r_erode=10,
     if r_erode > 0:
         mask = gen_erosion(mask, r_erode, r_erode)
 
-    mask = torch.from_numpy(mask).cuda()
+    mask = torch.from_numpy(mask).to(device)
 
     if max_size > 0:  # resize needed
         mask = F.interpolate(mask.unsqueeze(0).unsqueeze(0), size=(new_h, new_w), mode="nearest")
@@ -83,38 +103,41 @@ def main(input_path, mask_path, output_path, ckpt_path, n_warmup=10, r_erode=10,
     # inference start
     phas = []
     fgrs = []
-    for ti in tqdm.tqdm(range(length)):
-        # load the image as RGB; normalization is done within the model
-        image = vframes[ti]
+    
+    # Use appropriate autocast context based on device
+    with get_autocast_context(device):
+        for ti in tqdm.tqdm(range(length)):
+            # load the image as RGB; normalization is done within the model
+            image = vframes[ti]
 
-        image_np = np.array(image.permute(1,2,0))       # for output visualize
-        image = (image / 255.).cuda().float()           # for network input
+            image_np = np.array(image.permute(1,2,0))       # for output visualize
+            image = (image / 255.).to(device).float()       # for network input
 
-        if ti == 0:
-            output_prob = processor.step(image, mask, objects=objects)      # encode given mask
-            output_prob = processor.step(image, first_frame_pred=True)      # first frame for prediction
-        else:
-            if ti <= n_warmup:
-                output_prob = processor.step(image, first_frame_pred=True)  # reinit as the first frame for prediction
+            if ti == 0:
+                output_prob = processor.step(image, mask, objects=objects)      # encode given mask
+                output_prob = processor.step(image, first_frame_pred=True)      # first frame for prediction
             else:
-                output_prob = processor.step(image)
+                if ti <= n_warmup:
+                    output_prob = processor.step(image, first_frame_pred=True)  # reinit as the first frame for prediction
+                else:
+                    output_prob = processor.step(image)
 
-        # convert output probabilities to alpha matte
-        mask = processor.output_prob_to_mask(output_prob)
+            # convert output probabilities to alpha matte
+            mask = processor.output_prob_to_mask(output_prob)
 
-        # visualize prediction
-        pha = mask.unsqueeze(2).cpu().numpy()
-        com_np = image_np / 255. * pha + bgr * (1 - pha)
-        
-        # DONOT save the warmup frame
-        if ti > (n_warmup-1):
-            com_np = (com_np*255).astype(np.uint8)
-            pha = (pha*255).astype(np.uint8)
-            fgrs.append(com_np)
-            phas.append(pha)
-            if save_image:
-                cv2.imwrite(f'{output_path}/{video_name}/pha/{str(ti-n_warmup).zfill(5)}.png', pha)
-                cv2.imwrite(f'{output_path}/{video_name}/fgr/{str(ti-n_warmup).zfill(5)}.png', com_np[...,[2,1,0]])
+            # visualize prediction
+            pha = mask.unsqueeze(2).cpu().numpy()
+            com_np = image_np / 255. * pha + bgr * (1 - pha)
+            
+            # DONOT save the warmup frame
+            if ti > (n_warmup-1):
+                com_np = (com_np*255).astype(np.uint8)
+                pha = (pha*255).astype(np.uint8)
+                fgrs.append(com_np)
+                phas.append(pha)
+                if save_image:
+                    cv2.imwrite(f'{output_path}/{video_name}/pha/{str(ti-n_warmup).zfill(5)}.png', pha)
+                    cv2.imwrite(f'{output_path}/{video_name}/fgr/{str(ti-n_warmup).zfill(5)}.png', com_np[...,[2,1,0]])
 
     phas = np.array(phas)
     fgrs = np.array(fgrs)

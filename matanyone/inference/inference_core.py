@@ -1,12 +1,15 @@
 import logging
 from omegaconf import DictConfig
-from typing import List, Optional, Iterable, Union,Tuple
+from typing import List, Optional, Iterable, Union, Tuple
 
 import os
+import sys
 import cv2
 import torch
 import imageio
 import tempfile
+import platform
+import subprocess
 import numpy as np
 from tqdm import tqdm
 from PIL import Image
@@ -21,21 +24,33 @@ from matanyone.utils.inference_utils import gen_dilate, gen_erosion, read_frame_
 
 log = logging.getLogger()
 
+# Set up device detection for Mac MPS support
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+    print("Using MPS (Apple Metal) for PyTorch")
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+    print("Using CUDA")
+else:
+    device = torch.device("cpu")
+    print("Using CPU")
+
 
 class InferenceCore:
 
     def __init__(self,
-                 network: Union[MatAnyone,str],
+                 network: Union[MatAnyone, str],
                  cfg: DictConfig = None,
                  *,
                  image_feature_store: ImageFeatureStore = None,
-                 device: Union[str, torch.device] = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                 device: Union[str, torch.device] = device  # Use the global device variable
                  ):
         if isinstance(network, str):
             network = MatAnyone.from_pretrained(network)
         network.to(device)
         network.eval()
         self.network = network  
+        self.device = device  # Store device for later use
         cfg = cfg if cfg is not None else network.cfg
         self.cfg = cfg
         self.mem_every = cfg.mem_every
@@ -64,6 +79,14 @@ class InferenceCore:
         self.last_mask = None
         self.last_pix_feat = None
         self.last_msk_value = None
+
+    def _ensure_tensor_on_device(self, tensor_or_np):
+        """Ensure tensor is on the correct device"""
+        if isinstance(tensor_or_np, np.ndarray):
+            return torch.from_numpy(tensor_or_np).to(self.device)
+        elif isinstance(tensor_or_np, torch.Tensor):
+            return tensor_or_np.to(self.device)
+        return tensor_or_np
 
     def clear_memory(self):
         self.curr_ti = -1
@@ -188,6 +211,18 @@ class InferenceCore:
                                                             self.object_manager.all_obj_ids),
                                                         chunk_size=self.chunk_size,
                                                         update_sensory=update_sensory)
+        
+        # Check for dimension compatibility and fix if needed
+        expected_h, expected_w = key.shape[-2] * 16, key.shape[-1] * 16
+        if pred_prob_with_bg.shape[-2] != expected_h or pred_prob_with_bg.shape[-1] != expected_w:
+            log.info(f"Resizing prediction to match expected dimensions: from {pred_prob_with_bg.shape[-2]}x{pred_prob_with_bg.shape[-1]} to {expected_h}x{expected_w}")
+            pred_prob_with_bg = F.interpolate(
+                pred_prob_with_bg.unsqueeze(1),
+                size=(expected_h, expected_w),
+                mode='bilinear',
+                align_corners=False
+            ).squeeze(1)
+            
         # remove batch dim
         if self.flip_aug:
             # average predictions of the non-flipped and flipped version
@@ -274,7 +309,7 @@ class InferenceCore:
 
         self.curr_ti += 1
 
-        image, self.pad = pad_divide_by(image, 16) # DONE alreay for 3DCNN!!
+        image, self.pad = pad_divide_by(image, 16) # DONE already for 3DCNN!!
         image = image.unsqueeze(0)  # add the batch dimension
         if self.flip_aug:
             image = torch.cat([image, torch.flip(image, dims=[-1])], dim=0)
@@ -298,7 +333,15 @@ class InferenceCore:
         # encoding the image
         ms_feat, pix_feat = self.image_feature_store.get_features(self.curr_ti, image)
         key, shrinkage, selection = self.image_feature_store.get_key(self.curr_ti, image)
-
+        
+        # Check for feature dimensions compatibility and resize if needed
+        if pix_feat.shape[-2] * 16 != image.shape[-2] or pix_feat.shape[-1] * 16 != image.shape[-1]:
+            # Log dimension mismatch for debugging
+            log.info(f"Dimension mismatch detected: image {image.shape}, pix_feat {pix_feat.shape}")
+            # Resize image to match expected feature dimensions
+            new_h, new_w = pix_feat.shape[-2] * 16, pix_feat.shape[-1] * 16
+            image = F.interpolate(image, size=(new_h, new_w), mode='bilinear', align_corners=False)
+            
         # segmentation from memory if needed
         if need_segment:
             pred_prob_with_bg = self._segment(key,
@@ -314,7 +357,10 @@ class InferenceCore:
             # (starts with 1 due to the background channel)
             corresponding_tmp_ids, _ = self.object_manager.add_new_objects(objects)
 
+            # Ensure mask is on the same device as the model
+            mask = mask.to(self.device)
             mask, _ = pad_divide_by(mask, 16)
+            
             if need_segment:
                 # merge predicted mask with the incomplete input mask
                 pred_prob_no_bg = pred_prob_with_bg[1:]
@@ -420,7 +466,6 @@ class InferenceCore:
         return new_mask
 
     @torch.inference_mode()
-    @torch.amp.autocast("cuda")
     def process_video(
         self,
         input_path: str,
@@ -455,7 +500,12 @@ class InferenceCore:
             - Saves processed video files with foreground (_fgr) and alpha matte (_pha)
             - If save_image=True, saves individual frames in separate directories
         """
-        output_path = output_path if output_path is not None else tempfile.TemporaryDirectory().name
+        # Create output directory
+        if output_path is None:
+            output_path = tempfile.TemporaryDirectory().name
+        os.makedirs(output_path, exist_ok=True)
+
+        # Convert parameters
         r_erode = int(r_erode)
         r_dilate = int(r_dilate)
         n_warmup = int(n_warmup)
@@ -483,19 +533,33 @@ class InferenceCore:
             os.makedirs(f"{output_path}/{video_name}/pha", exist_ok=True)
             os.makedirs(f"{output_path}/{video_name}/fgr", exist_ok=True)
 
+        # Load mask and ensure it's on the correct device
         mask = np.array(Image.open(mask_path).convert("L"))
         if r_dilate > 0:
             mask = gen_dilate(mask, r_dilate, r_dilate)
         if r_erode > 0:
             mask = gen_erosion(mask, r_erode, r_erode)
         
-        mask = torch.from_numpy(mask).cuda()
+        # Convert mask to tensor and move to correct device
+        mask = torch.from_numpy(mask).to(self.device)
+        
         if max_size > 0:
             mask = F.interpolate(
-                mask.unsqueeze(0).unsqueeze(0), size=(new_h, new_w), mode="nearest"
+                mask.unsqueeze(0).unsqueeze(0).float(), 
+                size=(new_h, new_w), 
+                mode="nearest"
+            )[0, 0]
+        
+        # Ensure mask dimensions match expected size
+        if mask.shape[0] != new_h or mask.shape[1] != new_w:
+            mask = F.interpolate(
+                mask.unsqueeze(0).unsqueeze(0).float(), 
+                size=(new_h, new_w), 
+                mode="nearest"
             )[0, 0]
 
-        bgr = (np.array([120, 255, 155], dtype=np.float32) / 255).reshape((1, 1, 3))
+        # Use pure black background (changed from green)
+        bgr = np.zeros((1, 1, 3), dtype=np.float32)
         objects = [1]
 
         phas = []
@@ -503,7 +567,8 @@ class InferenceCore:
         for ti in tqdm(range(length)):
             image = vframes[ti]
             image_np = np.array(image.permute(1, 2, 0))
-            image = (image / 255.0).cuda().float()
+            # Move image to the same device as model
+            image = (image / 255.0).to(self.device).float()
 
             if ti == 0:
                 output_prob = self.step(image, mask, objects=objects)
@@ -515,7 +580,9 @@ class InferenceCore:
                     output_prob = self.step(image)
 
             mask = self.output_prob_to_mask(output_prob)
-            pha = mask.unsqueeze(2).cpu().numpy()
+            # Move mask to CPU for numpy operations
+            pha = mask.cpu().unsqueeze(2).numpy()
+            
             com_np = image_np / 255.0 * pha + bgr * (1 - pha)
 
             if ti > (n_warmup - 1):
@@ -539,7 +606,71 @@ class InferenceCore:
         fgr_filename = f"{output_path}/{video_name}_fgr.mp4"
         alpha_filename = f"{output_path}/{video_name}_pha.mp4"
         
-        imageio.mimwrite(fgr_filename, fgrs, fps=fps, quality=7)
-        imageio.mimwrite(alpha_filename, phas, fps=fps, quality=7)
+        # Check if ffmpeg is properly installed and set environment variable if needed
+        try:
+            # For Mac, try to find ffmpeg in common Homebrew locations
+            if platform.system() == 'Darwin':  # macOS
+                possible_ffmpeg_paths = [
+                    '/opt/homebrew/bin/ffmpeg',
+                    '/usr/local/bin/ffmpeg',
+                    '/opt/local/bin/ffmpeg',
+                    '/usr/bin/ffmpeg'
+                ]
+                
+                for path in possible_ffmpeg_paths:
+                    if os.path.exists(path):
+                        os.environ['IMAGEIO_FFMPEG_EXE'] = path
+                        print(f"Set IMAGEIO_FFMPEG_EXE to {path}")
+                        break
+                        
+                # If not found, try to determine it using 'which'
+                if 'IMAGEIO_FFMPEG_EXE' not in os.environ:
+                    try:
+                        ffmpeg_path = subprocess.check_output(['which', 'ffmpeg'], text=True).strip()
+                        if ffmpeg_path:
+                            os.environ['IMAGEIO_FFMPEG_EXE'] = ffmpeg_path
+                            print(f"Set IMAGEIO_FFMPEG_EXE to {ffmpeg_path}")
+                    except (subprocess.SubprocessError, FileNotFoundError):
+                        print("Could not find ffmpeg. Please install it with 'brew install ffmpeg'")
+            
+            # Now try to save the videos
+            print(f"Saving foreground video to {fgr_filename}")
+            imageio.mimwrite(fgr_filename, fgrs, fps=fps, quality=7)
+            
+            print(f"Saving alpha video to {alpha_filename}")
+            imageio.mimwrite(alpha_filename, phas, fps=fps, quality=7)
+            
+            print("Videos saved successfully")
+            
+        except Exception as e:
+            print(f"Error saving video: {e}")
+            print("\nFIX FOR MAC: Please install ffmpeg with Homebrew:")
+            print("  brew install ffmpeg")
+            print("\nIf you don't have Homebrew, install it with:")
+            print("  /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"")
+            print("\nAlternatively, manually set the IMAGEIO_FFMPEG_EXE environment variable:")
+            print("  export IMAGEIO_FFMPEG_EXE=/path/to/your/ffmpeg")
+            
+            # Try alternative method for saving 
+            try:
+                print("Attempting to save images as individual PNG files instead...")
+                # Create output directories if they don't exist
+                frame_dir = f"{output_path}/{video_name}_frames"
+                alpha_dir = f"{output_path}/{video_name}_alpha"
+                
+                os.makedirs(frame_dir, exist_ok=True)
+                os.makedirs(alpha_dir, exist_ok=True)
+                
+                # Save individual frames
+                for i, (fgr, pha) in enumerate(zip(fgrs, phas)):
+                    cv2.imwrite(f"{frame_dir}/{i:05d}.png", fgr[..., [2, 1, 0]])
+                    cv2.imwrite(f"{alpha_dir}/{i:05d}.png", pha)
+                
+                print(f"Successfully saved frames to {frame_dir}/ and {alpha_dir}/")
+                # Update the return paths to point to the directories instead
+                fgr_filename = frame_dir
+                alpha_filename = alpha_dir
+            except Exception as e2:
+                print(f"Failed to save individual frames: {e2}")
         
-        return (fgr_filename,alpha_filename)
+        return (fgr_filename, alpha_filename)
