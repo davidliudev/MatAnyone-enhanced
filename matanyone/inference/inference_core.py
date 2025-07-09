@@ -602,13 +602,29 @@ class InferenceCore:
                         pha_uint8,
                     )
                     
-                    # Save RGBA PNG with transparency (no bgr bleeding)
-                    rgba = np.zeros((pha_uint8.shape[0], pha_uint8.shape[1], 4), dtype=np.uint8)
-                    rgba[:, :, :3] = image_np.astype(np.uint8)  # Original RGB
-                    rgba[:, :, 3] = pha_uint8[:, :, 0]  # Alpha channel
+                    # Save RGBA PNG with transparency - fix channel order!
+                    # cv2.imwrite expects BGR, but image_np is RGB - need to swap channels
+                    
+                    # Standard (straight) alpha version
+                    rgba_straight = np.zeros((pha_uint8.shape[0], pha_uint8.shape[1], 4), dtype=np.uint8)
+                    rgba_straight[:, :, :3] = image_np.astype(np.uint8)[..., [2, 1, 0]]  # Convert RGB to BGR
+                    rgba_straight[:, :, 3] = pha_uint8[:, :, 0]  # Alpha channel
                     cv2.imwrite(
                         f"{output_path}/{video_name}/fgr/{str(ti - n_warmup).zfill(5)}.png",
-                        rgba,
+                        rgba_straight,
+                    )
+                    
+                    # Pre-multiplied alpha version
+                    pha_norm = pha_uint8.astype(np.float32) / 255.0
+                    premult_rgb = image_np.astype(np.float32) * pha_norm  # Pre-multiply RGB with alpha
+                    premult_rgb = premult_rgb.astype(np.uint8)
+                    
+                    rgba_premult = np.zeros((pha_uint8.shape[0], pha_uint8.shape[1], 4), dtype=np.uint8)
+                    rgba_premult[:, :, :3] = premult_rgb[..., [2, 1, 0]]  # Convert RGB to BGR
+                    rgba_premult[:, :, 3] = pha_uint8[:, :, 0]  # Alpha channel
+                    cv2.imwrite(
+                        f"{output_path}/{video_name}/fgr/{str(ti - n_warmup).zfill(5)}_premult.png",
+                        rgba_premult,
                     )
 
         fgrs = np.array(fgrs)
