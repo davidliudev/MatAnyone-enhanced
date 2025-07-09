@@ -28,9 +28,6 @@
         <a href="https://www.youtube.com/watch?v=oih0Zk-UW18" target='_blank'>
         <img src="https://img.shields.io/badge/Demo%20Video-%23FF0000.svg?logo=YouTube&logoColor=white">
         </a>
-        <a href="https://huggingface.co/spaces/PeiqingYang/MatAnyone" target='_blank'>
-        <img src="https://img.shields.io/badge/Demo-%F0%9F%A4%97%20Hugging%20Face-blue">
-        </a>
         <img src="https://api.infinitescript.com/badgen/count?name=sczhou/MatAnyone&ltext=Visitors&color=3977dd">
     </h4>
 </div>
@@ -49,8 +46,7 @@
 
 ## 📮 Update
 - [2025.03] Release our evaluation benchmark - [YouTubeMatte](https://github.com/pq-yang/MatAnyone?tab=readme-ov-file#-evaluation-benchmark).
-- [2025.03] Integrate MatAnyone with Hugging Face 🤗
-- [2025.02] Release inference codes and gradio demo.
+- [2025.02] Release inference codes.
 - [2025.02] This repo is created.
 
 ## 🔎 Overview
@@ -71,28 +67,7 @@
 
     # install python dependencies
     pip install -e .
-    # [optional] install python dependencies for gradio demo
-    pip3 install -r hugging_face/requirements.txt
     ```
-
-## 🤗 Load from Hugging Face
-Alternatively, models can be directly loaded from [Hugging Face](https://huggingface.co/PeiqingYang/MatAnyone) to make inference.
-
-```shell
-pip install -q git+https://github.com/pq-yang/MatAnyone
-```
-
-To extract the foreground and the alpha video you can directly run the following lines. Please refer to [inference_hf.py](https://github.com/pq-yang/MatAnyone/blob/main/inference_hf.py) for more arguments.
-```python
-from matanyone import InferenceCore
-processor = InferenceCore("PeiqingYang/MatAnyone")
-
-foreground_path, alpha_path = processor.process_video(
-    input_path = "inputs/video/test-sample1.mp4",
-    mask_path = "inputs/mask/test-sample1.png",
-    output_path = "outputs"
-)
-```
 
 ## 🔥 Inference
 
@@ -137,23 +112,6 @@ python inference_matanyone.py -i inputs/video/test-sample0 -m inputs/mask/test-s
 The results will be saved in the `results` folder, including the foreground output video and the alpha output video. 
 - If you want to save the results as per-frame images, you can set `--save_image`.
 - If you want to set a limit for the maximum input resolution, you can set `--max_size`, and the video will be downsampled if min(w, h) exceeds. By default, we don't set the limit.
-
-## 🎪 Interactive Demo
-To get rid of the preparation for first-frame segmentation mask, we prepare a gradio demo on [hugging face](https://huggingface.co/spaces/PeiqingYang/MatAnyone) and could also **launch locally**. Just drop your video/image, assign the target masks with a few clicks, and get the the matting results!
-```shell
-cd hugging_face
-
-# install python dependencies
-pip3 install -r requirements.txt # FFmpeg required
-
-# launch the demo
-python app.py
-```
-
-By launching, an interactive interface will appear as follow:
-
-![overall_teaser](assets/teaser_demo.gif)
-
 
 ## 📊 Evaluation Benchmark
 
