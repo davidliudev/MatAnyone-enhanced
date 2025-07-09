@@ -44,17 +44,21 @@ pip install -e .
 
 ### Running Inference
 ```bash
-# Single target matting
+# Single target matting with default green background
 python inference_matanyone.py -i inputs/video/test-sample1.mp4 -m inputs/mask/test-sample1.png
 
 # Multiple targets (using different masks)
 python inference_matanyone.py -i inputs/video/test-sample0 -m inputs/mask/test-sample0_1.png --suffix target1
 python inference_matanyone.py -i inputs/video/test-sample0 -m inputs/mask/test-sample0_2.png --suffix target2
 
+# With custom background color (hex format)
+python inference_matanyone.py -i video.mp4 -m mask.png --bg_color #FF0000  # Red background
+python inference_matanyone.py -i video.mp4 -m mask.png --bg_color #000000  # Black background
+
 # With resolution limit
 python inference_matanyone.py -i video.mp4 -m mask.png --max_size 1080
 
-# Save per-frame images
+# Save per-frame images with transparency
 python inference_matanyone.py -i video.mp4 -m mask.png --save_image
 ```
 
@@ -65,9 +69,16 @@ python inference_matanyone.py -i video.mp4 -m mask.png --save_image
 - **Mask**: PNG image with first-frame segmentation (can be generated using SAM2)
 
 ### Outputs
-- **Foreground video**: RGB video with matted subject
-- **Alpha video**: Grayscale alpha matte video
-- Optional: Per-frame PNG images when using `--save_image`
+- **Foreground video** (`*_fgr.mp4`): RGB video with matted subject composited over specified background color
+- **Alpha video** (`*_pha.mp4`): Grayscale alpha matte video
+- **Per-frame PNG images** (when using `--save_image`):
+  - `fgr/`: RGBA PNG images with transparency support
+  - `pha/`: Single-channel alpha matte PNG images
+
+### New Features
+- **Transparent PNG Export**: When saving images, the foreground PNGs now include an alpha channel for true transparency
+- **Customizable Background Color**: Use `--bg_color` parameter with hex color codes (e.g., `#00FF00` for green screen)
+- **Default Background**: Changed from black to green (`#00FF00`) for better chroma key compatibility
 
 ## Model Configuration
 

@@ -477,6 +477,7 @@ class InferenceCore:
         suffix: str = "",
         save_image: bool = False,
         max_size: int = -1,
+        bg_color: str = "#00FF00",
     ) -> Tuple:
         """
         Process a video for object segmentation and matting.
@@ -492,6 +493,7 @@ class InferenceCore:
             suffix (str, optional): Suffix to append to output filename. Defaults to ""
             save_image (bool, optional): Whether to save individual frames. Defaults to False
             max_size (int, optional): Maximum size for frame dimension. Use -1 for no limit. Defaults to -1
+            bg_color (str, optional): Background color for video in hex format (e.g., #00FF00 for green). Defaults to "#00FF00"
         Returns:
             Tuple[str, str]: A tuple containing:
                 - Path to the output foreground video file (str)
@@ -558,8 +560,13 @@ class InferenceCore:
                 mode="nearest"
             )[0, 0]
 
-        # Use pure black background (changed from green)
-        bgr = np.zeros((1, 1, 3), dtype=np.float32)
+        # Parse background color from hex string
+        if bg_color.startswith('#'):
+            bg_color = bg_color[1:]
+        r = int(bg_color[0:2], 16)
+        g = int(bg_color[2:4], 16)
+        b = int(bg_color[4:6], 16)
+        bgr = (np.array([b, g, r], dtype=np.float32)/255).reshape((1, 1, 3)) # BGR format for OpenCV
         objects = [1]
 
         phas = []
@@ -582,22 +589,26 @@ class InferenceCore:
             mask = self.output_prob_to_mask(output_prob)
             # Move mask to CPU for numpy operations
             pha = mask.cpu().unsqueeze(2).numpy()
-            
-            com_np = image_np / 255.0 * pha + bgr * (1 - pha)
 
             if ti > (n_warmup - 1):
-                com_np = (com_np * 255).astype(np.uint8)
-                pha = (pha * 255).astype(np.uint8)
-                fgrs.append(com_np)
-                phas.append(pha)
+                # Keep original image and alpha separate for clean transparency
+                pha_uint8 = (pha * 255).astype(np.uint8)
+                phas.append(pha_uint8)
+                fgrs.append(image_np)  # Store original image without bgr composite
                 if save_image:
+                    # Save alpha as single channel PNG
                     cv2.imwrite(
                         f"{output_path}/{video_name}/pha/{str(ti - n_warmup).zfill(5)}.png",
-                        pha,
+                        pha_uint8,
                     )
+                    
+                    # Save RGBA PNG with transparency (no bgr bleeding)
+                    rgba = np.zeros((pha_uint8.shape[0], pha_uint8.shape[1], 4), dtype=np.uint8)
+                    rgba[:, :, :3] = image_np.astype(np.uint8)  # Original RGB
+                    rgba[:, :, 3] = pha_uint8[:, :, 0]  # Alpha channel
                     cv2.imwrite(
                         f"{output_path}/{video_name}/fgr/{str(ti - n_warmup).zfill(5)}.png",
-                        com_np[..., [2, 1, 0]],
+                        rgba,
                     )
 
         fgrs = np.array(fgrs)
@@ -635,7 +646,7 @@ class InferenceCore:
             
             # Now try to save the videos
             print(f"Saving foreground video to {fgr_filename}")
-            imageio.mimwrite(fgr_filename, fgrs, fps=fps, quality=7)
+            imageio.mimwrite(fgr_filename, fgrs_with_bg, fps=fps, quality=7)
             
             print(f"Saving alpha video to {alpha_filename}")
             imageio.mimwrite(alpha_filename, phas, fps=fps, quality=7)
@@ -661,9 +672,13 @@ class InferenceCore:
                 os.makedirs(frame_dir, exist_ok=True)
                 os.makedirs(alpha_dir, exist_ok=True)
                 
-                # Save individual frames
-                for i, (fgr, pha) in enumerate(zip(fgrs, phas)):
-                    cv2.imwrite(f"{frame_dir}/{i:05d}.png", fgr[..., [2, 1, 0]])
+                # Save individual frames with transparency
+                for i, (fgr, pha, orig) in enumerate(zip(fgrs, phas, orig_images)):
+                    # Save RGBA PNG with transparency
+                    rgba = np.zeros((pha.shape[0], pha.shape[1], 4), dtype=np.uint8)
+                    rgba[:, :, :3] = orig.astype(np.uint8)  # Original RGB
+                    rgba[:, :, 3] = pha[:, :, 0]  # Alpha channel
+                    cv2.imwrite(f"{frame_dir}/{i:05d}.png", rgba)
                     cv2.imwrite(f"{alpha_dir}/{i:05d}.png", pha)
                 
                 print(f"Successfully saved frames to {frame_dir}/ and {alpha_dir}/")

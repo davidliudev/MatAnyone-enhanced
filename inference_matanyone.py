@@ -8,7 +8,7 @@ from PIL import Image
 import torch
 import torch.nn.functional as F
 
-from hugging_face.tools.download_util import load_file_from_url
+from matanyone.utils.download_util import load_file_from_url
 from matanyone.utils.inference_utils import gen_dilate, gen_erosion, read_frame_from_videos
 
 from matanyone.inference.inference_core import InferenceCore
@@ -39,7 +39,7 @@ def get_autocast_context(device):
         return torch.inference_mode()
 
 @torch.inference_mode()
-def main(input_path, mask_path, output_path, ckpt_path, n_warmup=10, r_erode=10, r_dilate=10, suffix="", save_image=False, max_size=-1):
+def main(input_path, mask_path, output_path, ckpt_path, n_warmup=10, r_erode=10, r_dilate=10, suffix="", save_image=False, max_size=-1, bg_color="#00FF00"):
     # download ckpt for the first inference
     pretrain_model_url = "https://github.com/pq-yang/MatAnyone/releases/download/v1.0.0/matanyone.pth"
     ckpt_path = load_file_from_url(pretrain_model_url, 'pretrained_models')
@@ -85,7 +85,13 @@ def main(input_path, mask_path, output_path, ckpt_path, n_warmup=10, r_erode=10,
     mask = Image.open(mask_path).convert('L')
     mask = np.array(mask)
 
-    bgr = (np.array([0, 0, 0], dtype=np.float32)/255).reshape((1, 1, 3)) # green screen to paste fgr
+    # Parse background color from hex string
+    if bg_color.startswith('#'):
+        bg_color = bg_color[1:]
+    r = int(bg_color[0:2], 16)
+    g = int(bg_color[2:4], 16)
+    b = int(bg_color[4:6], 16)
+    bgr = (np.array([b, g, r], dtype=np.float32)/255).reshape((1, 1, 3)) # BGR format for OpenCV
     objects = [1]
 
     # [optional] erode & dilate
@@ -127,22 +133,38 @@ def main(input_path, mask_path, output_path, ckpt_path, n_warmup=10, r_erode=10,
 
             # visualize prediction
             pha = mask.unsqueeze(2).cpu().numpy()
-            com_np = image_np / 255. * pha + bgr * (1 - pha)
             
             # DONOT save the warmup frame
             if ti > (n_warmup-1):
-                com_np = (com_np*255).astype(np.uint8)
-                pha = (pha*255).astype(np.uint8)
-                fgrs.append(com_np)
-                phas.append(pha)
+                # Keep original image and alpha separate for clean transparency
+                pha_uint8 = (pha*255).astype(np.uint8)
+                phas.append(pha_uint8)
+                fgrs.append(image_np)  # Store original image without bgr composite
+                
                 if save_image:
-                    cv2.imwrite(f'{output_path}/{video_name}/pha/{str(ti-n_warmup).zfill(5)}.png', pha)
-                    cv2.imwrite(f'{output_path}/{video_name}/fgr/{str(ti-n_warmup).zfill(5)}.png', com_np[...,[2,1,0]])
+                    # Save alpha as single channel PNG
+                    cv2.imwrite(f'{output_path}/{video_name}/pha/{str(ti-n_warmup).zfill(5)}.png', pha_uint8)
+                    
+                    # Save RGBA PNG with transparency (no bgr bleeding)
+                    rgba = np.zeros((pha_uint8.shape[0], pha_uint8.shape[1], 4), dtype=np.uint8)
+                    rgba[:, :, :3] = image_np.astype(np.uint8)  # Original RGB
+                    rgba[:, :, 3] = pha_uint8[:, :, 0]  # Alpha channel
+                    cv2.imwrite(f'{output_path}/{video_name}/fgr/{str(ti-n_warmup).zfill(5)}.png', rgba)
 
     phas = np.array(phas)
     fgrs = np.array(fgrs)
+    
+    # Composite with background color only for video export
+    fgrs_with_bg = []
+    for fgr, pha in zip(fgrs, phas):
+        pha_norm = pha.astype(np.float32) / 255.0
+        com_np = fgr / 255. * pha_norm + bgr * (1 - pha_norm)
+        com_np = (com_np * 255).astype(np.uint8)
+        fgrs_with_bg.append(com_np)
+    
+    fgrs_with_bg = np.array(fgrs_with_bg)
 
-    imageio.mimwrite(f'{output_path}/{video_name}_fgr.mp4', fgrs, fps=fps, quality=7)
+    imageio.mimwrite(f'{output_path}/{video_name}_fgr.mp4', fgrs_with_bg, fps=fps, quality=7)
     imageio.mimwrite(f'{output_path}/{video_name}_pha.mp4', phas, fps=fps, quality=7)
 
 if __name__ == '__main__':
@@ -158,6 +180,7 @@ if __name__ == '__main__':
     parser.add_argument('--suffix', type=str, default="", help='Suffix to specify different target when saving, e.g., target1.')
     parser.add_argument('--save_image', action='store_true', default=False, help='Save output frames. Default: False')
     parser.add_argument('--max_size', type=str, default="-1", help='When positive, the video will be downsampled if min(w, h) exceeds. Default: -1 (means no limit)')
+    parser.add_argument('--bg_color', type=str, default="#00FF00", help='Background color for video in hex format (e.g., #00FF00 for green). Default: #00FF00')
 
     
     args = parser.parse_args()
@@ -171,4 +194,5 @@ if __name__ == '__main__':
          r_dilate=args.dilate_kernel, \
          suffix=args.suffix, \
          save_image=args.save_image, \
-         max_size=args.max_size)
+         max_size=args.max_size, \
+         bg_color=args.bg_color)
