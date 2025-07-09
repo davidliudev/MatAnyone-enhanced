@@ -39,7 +39,7 @@ def get_autocast_context(device):
         return torch.inference_mode()
 
 @torch.inference_mode()
-def main(input_path, mask_path, output_path, ckpt_path, n_warmup=10, r_erode=10, r_dilate=10, suffix="", save_image=False, max_size=-1, bg_color="#00FF00"):
+def main(input_path, mask_path, output_path, ckpt_path, n_warmup=10, r_erode=10, r_dilate=10, suffix="", save_image=False, max_size=-1, bg_color="#00FF00", save_video=False):
     # download ckpt for the first inference
     pretrain_model_url = "https://github.com/pq-yang/MatAnyone/releases/download/v1.0.0/matanyone.pth"
     ckpt_path = load_file_from_url(pretrain_model_url, 'pretrained_models')
@@ -159,18 +159,20 @@ def main(input_path, mask_path, output_path, ckpt_path, n_warmup=10, r_erode=10,
     phas = np.array(phas)
     fgrs = np.array(fgrs)
     
-    # Composite with background color only for video export
-    fgrs_with_bg = []
-    for fgr, pha in zip(fgrs, phas):
-        pha_norm = pha.astype(np.float32) / 255.0
-        com_np = fgr / 255. * pha_norm + bgr * (1 - pha_norm)
-        com_np = (com_np * 255).astype(np.uint8)
-        fgrs_with_bg.append(com_np)
-    
-    fgrs_with_bg = np.array(fgrs_with_bg)
+    # Only generate video if save_video flag is set
+    if save_video:
+        # Composite with background color only for video export
+        fgrs_with_bg = []
+        for fgr, pha in zip(fgrs, phas):
+            pha_norm = pha.astype(np.float32) / 255.0
+            com_np = fgr / 255. * pha_norm + bgr * (1 - pha_norm)
+            com_np = (com_np * 255).astype(np.uint8)
+            fgrs_with_bg.append(com_np)
+        
+        fgrs_with_bg = np.array(fgrs_with_bg)
 
-    imageio.mimwrite(f'{output_path}/{video_name}_fgr.mp4', fgrs_with_bg, fps=fps, quality=7)
-    imageio.mimwrite(f'{output_path}/{video_name}_pha.mp4', phas, fps=fps, quality=7)
+        imageio.mimwrite(f'{output_path}/{video_name}_fgr.mp4', fgrs_with_bg, fps=fps, quality=7)
+        imageio.mimwrite(f'{output_path}/{video_name}_pha.mp4', phas, fps=fps, quality=7)
 
 if __name__ == '__main__':
     import argparse
@@ -186,6 +188,7 @@ if __name__ == '__main__':
     parser.add_argument('--save_image', action='store_true', default=False, help='Save output frames. Default: False')
     parser.add_argument('--max_size', type=str, default="-1", help='When positive, the video will be downsampled if min(w, h) exceeds. Default: -1 (means no limit)')
     parser.add_argument('--bg_color', type=str, default="#00FF00", help='Background color for video in hex format (e.g., #00FF00 for green). Default: #00FF00')
+    parser.add_argument('--save_video', action='store_true', default=False, help='Save video output. Default: False')
 
     
     args = parser.parse_args()
@@ -200,4 +203,5 @@ if __name__ == '__main__':
          suffix=args.suffix, \
          save_image=args.save_image, \
          max_size=args.max_size, \
-         bg_color=args.bg_color)
+         bg_color=args.bg_color, \
+         save_video=args.save_video)

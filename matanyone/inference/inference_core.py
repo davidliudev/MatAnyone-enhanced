@@ -478,6 +478,7 @@ class InferenceCore:
         save_image: bool = False,
         max_size: int = -1,
         bg_color: str = "#00FF00",
+        save_video: bool = False,
     ) -> Tuple:
         """
         Process a video for object segmentation and matting.
@@ -494,6 +495,7 @@ class InferenceCore:
             save_image (bool, optional): Whether to save individual frames. Defaults to False
             max_size (int, optional): Maximum size for frame dimension. Use -1 for no limit. Defaults to -1
             bg_color (str, optional): Background color for video in hex format (e.g., #00FF00 for green). Defaults to "#00FF00"
+            save_video (bool, optional): Whether to save video output. Defaults to False
         Returns:
             Tuple[str, str]: A tuple containing:
                 - Path to the output foreground video file (str)
@@ -619,78 +621,94 @@ class InferenceCore:
         fgrs = np.array(fgrs)
         phas = np.array(phas)
         
-        fgr_filename = f"{output_path}/{video_name}_fgr.mp4"
-        alpha_filename = f"{output_path}/{video_name}_pha.mp4"
-        
-        # Check if ffmpeg is properly installed and set environment variable if needed
-        try:
-            # For Mac, try to find ffmpeg in common Homebrew locations
-            if platform.system() == 'Darwin':  # macOS
-                possible_ffmpeg_paths = [
-                    '/opt/homebrew/bin/ffmpeg',
-                    '/usr/local/bin/ffmpeg',
-                    '/opt/local/bin/ffmpeg',
-                    '/usr/bin/ffmpeg'
-                ]
-                
-                for path in possible_ffmpeg_paths:
-                    if os.path.exists(path):
-                        os.environ['IMAGEIO_FFMPEG_EXE'] = path
-                        print(f"Set IMAGEIO_FFMPEG_EXE to {path}")
-                        break
-                        
-                # If not found, try to determine it using 'which'
-                if 'IMAGEIO_FFMPEG_EXE' not in os.environ:
-                    try:
-                        ffmpeg_path = subprocess.check_output(['which', 'ffmpeg'], text=True).strip()
-                        if ffmpeg_path:
-                            os.environ['IMAGEIO_FFMPEG_EXE'] = ffmpeg_path
-                            print(f"Set IMAGEIO_FFMPEG_EXE to {ffmpeg_path}")
-                    except (subprocess.SubprocessError, FileNotFoundError):
-                        print("Could not find ffmpeg. Please install it with 'brew install ffmpeg'")
+        # Only generate video if save_video flag is set
+        if save_video:
+            fgr_filename = f"{output_path}/{video_name}_fgr.mp4"
+            alpha_filename = f"{output_path}/{video_name}_pha.mp4"
             
-            # Now try to save the videos
-            print(f"Saving foreground video to {fgr_filename}")
-            imageio.mimwrite(fgr_filename, fgrs_with_bg, fps=fps, quality=7)
+            # Composite with background color for video export
+            fgrs_with_bg = []
+            for fgr, pha in zip(fgrs, phas):
+                pha_norm = pha.astype(np.float32) / 255.0
+                com_np = fgr / 255. * pha_norm + bgr * (1 - pha_norm)
+                com_np = (com_np * 255).astype(np.uint8)
+                fgrs_with_bg.append(com_np)
             
-            print(f"Saving alpha video to {alpha_filename}")
-            imageio.mimwrite(alpha_filename, phas, fps=fps, quality=7)
+            fgrs_with_bg = np.array(fgrs_with_bg)
             
-            print("Videos saved successfully")
-            
-        except Exception as e:
-            print(f"Error saving video: {e}")
-            print("\nFIX FOR MAC: Please install ffmpeg with Homebrew:")
-            print("  brew install ffmpeg")
-            print("\nIf you don't have Homebrew, install it with:")
-            print("  /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"")
-            print("\nAlternatively, manually set the IMAGEIO_FFMPEG_EXE environment variable:")
-            print("  export IMAGEIO_FFMPEG_EXE=/path/to/your/ffmpeg")
-            
-            # Try alternative method for saving 
+            # Check if ffmpeg is properly installed and set environment variable if needed
             try:
-                print("Attempting to save images as individual PNG files instead...")
-                # Create output directories if they don't exist
-                frame_dir = f"{output_path}/{video_name}_frames"
-                alpha_dir = f"{output_path}/{video_name}_alpha"
+                # For Mac, try to find ffmpeg in common Homebrew locations
+                if platform.system() == 'Darwin':  # macOS
+                    possible_ffmpeg_paths = [
+                        '/opt/homebrew/bin/ffmpeg',
+                        '/usr/local/bin/ffmpeg',
+                        '/opt/local/bin/ffmpeg',
+                        '/usr/bin/ffmpeg'
+                    ]
+                    
+                    for path in possible_ffmpeg_paths:
+                        if os.path.exists(path):
+                            os.environ['IMAGEIO_FFMPEG_EXE'] = path
+                            print(f"Set IMAGEIO_FFMPEG_EXE to {path}")
+                            break
+                            
+                    # If not found, try to determine it using 'which'
+                    if 'IMAGEIO_FFMPEG_EXE' not in os.environ:
+                        try:
+                            ffmpeg_path = subprocess.check_output(['which', 'ffmpeg'], text=True).strip()
+                            if ffmpeg_path:
+                                os.environ['IMAGEIO_FFMPEG_EXE'] = ffmpeg_path
+                                print(f"Set IMAGEIO_FFMPEG_EXE to {ffmpeg_path}")
+                        except (subprocess.SubprocessError, FileNotFoundError):
+                            print("Could not find ffmpeg. Please install it with 'brew install ffmpeg'")
                 
-                os.makedirs(frame_dir, exist_ok=True)
-                os.makedirs(alpha_dir, exist_ok=True)
+                # Now try to save the videos
+                print(f"Saving foreground video to {fgr_filename}")
+                imageio.mimwrite(fgr_filename, fgrs_with_bg, fps=fps, quality=7)
                 
-                # Save individual frames with transparency
-                for i, (fgr, pha, orig) in enumerate(zip(fgrs, phas, orig_images)):
-                    # Save RGBA PNG with transparency
-                    rgba = np.zeros((pha.shape[0], pha.shape[1], 4), dtype=np.uint8)
-                    rgba[:, :, :3] = orig.astype(np.uint8)  # Original RGB
-                    rgba[:, :, 3] = pha[:, :, 0]  # Alpha channel
-                    cv2.imwrite(f"{frame_dir}/{i:05d}.png", rgba)
-                    cv2.imwrite(f"{alpha_dir}/{i:05d}.png", pha)
+                print(f"Saving alpha video to {alpha_filename}")
+                imageio.mimwrite(alpha_filename, phas, fps=fps, quality=7)
                 
-                print(f"Successfully saved frames to {frame_dir}/ and {alpha_dir}/")
-                # Update the return paths to point to the directories instead
-                fgr_filename = frame_dir
-                alpha_filename = alpha_dir
-            except Exception as e2:
-                print(f"Failed to save individual frames: {e2}")
+                print("Videos saved successfully")
+                
+            except Exception as e:
+                print(f"Error saving video: {e}")
+                print("\nFIX FOR MAC: Please install ffmpeg with Homebrew:")
+                print("  brew install ffmpeg")
+                print("\nIf you don't have Homebrew, install it with:")
+                print("  /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"")
+                print("\nAlternatively, manually set the IMAGEIO_FFMPEG_EXE environment variable:")
+                print("  export IMAGEIO_FFMPEG_EXE=/path/to/your/ffmpeg")
+                
+                # Try alternative method for saving 
+                try:
+                    print("Attempting to save images as individual PNG files instead...")
+                    # Create output directories if they don't exist
+                    frame_dir = f"{output_path}/{video_name}_frames"
+                    alpha_dir = f"{output_path}/{video_name}_alpha"
+                    
+                    os.makedirs(frame_dir, exist_ok=True)
+                    os.makedirs(alpha_dir, exist_ok=True)
+                    
+                    # Save individual frames with transparency
+                    for i, (fgr, pha) in enumerate(zip(fgrs, phas)):
+                        # Save RGBA PNG with transparency
+                        rgba = np.zeros((pha.shape[0], pha.shape[1], 4), dtype=np.uint8)
+                        rgba[:, :, :3] = fgr.astype(np.uint8)  # Original RGB
+                        rgba[:, :, 3] = pha[:, :, 0]  # Alpha channel
+                        cv2.imwrite(f"{frame_dir}/{i:05d}.png", rgba)
+                        cv2.imwrite(f"{alpha_dir}/{i:05d}.png", pha)
+                    
+                    print(f"Successfully saved frames to {frame_dir}/ and {alpha_dir}/")
+                    # Update the return paths to point to the directories instead
+                    fgr_filename = frame_dir
+                    alpha_filename = alpha_dir
+                except Exception as e2:
+                    print(f"Failed to save individual frames: {e2}")
         
-        return (fgr_filename, alpha_filename)
+        # Return appropriate values based on whether video was saved
+        if save_video:
+            return (fgr_filename, alpha_filename)
+        else:
+            return (None, None)
