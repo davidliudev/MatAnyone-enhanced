@@ -7,11 +7,11 @@ import torch
 import torchvision
 
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG')
-VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.MP4', '.MOV', '.AVI')
+VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.webm', '.MP4', '.MOV', '.AVI', '.WEBM')
 
 def read_frame_from_videos(frame_root):
     if frame_root.endswith(VIDEO_EXTENSIONS):  # Video file path
-        video_name = os.path.basename(frame_root)[:-4]
+        video_name = os.path.splitext(os.path.basename(frame_root))[0]  # Remove extension properly
         frames, _, info = torchvision.io.read_video(filename=frame_root, pts_unit='sec', output_format='TCHW') # RGB
         fps = info['video_fps']
     else:
